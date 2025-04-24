@@ -22,6 +22,7 @@ locals {
   role_name              = var.enable_export_backup ? "roles/cloudsql.admin" : "roles/cloudsql.viewer"
   export_name            = var.use_sql_instance_replica_in_exporter ? "sql-export-${var.sql_instance_replica}${var.unique_suffix}" : "sql-export-${var.sql_instance}${var.unique_suffix}"
   notification_channels  = var.create_notification_channel ? concat(var.notification_channels, [google_monitoring_notification_channel.email[0].id]) : var.notification_channels
+  restore_name           = var.enable_restore ? "sql-restore-${var.restore_instance_name}${var.unique_suffix}" : null
 }
 
 
@@ -217,6 +218,80 @@ resource "google_monitoring_alert_policy" "sql_export_workflow_success_alert" {
           | filter metric.status == 'SUCCEEDED'
           | group_by ${var.export_monitoring_frequency}, [value_finished_execution_count_sum: sum(value.finished_execution_count)]
           | every ${var.export_monitoring_frequency}
+          | condition val() < 1 '1'
+      EOT
+      duration = "3600s"
+      trigger { count = 1 }
+      evaluation_missing_data = "EVALUATION_MISSING_DATA_ACTIVE"
+    }
+  }
+  notification_channels = local.notification_channels
+}
+
+################################
+#                              #
+#       Database Restore       #
+#                              #
+################################
+resource "google_workflows_workflow" "sql_restore" {
+  count           = var.enable_restore ? 1 : 0
+  name            = local.restore_name
+  region          = var.region
+  description     = "Workflow for restoring a CloudSQL Instance from backup"
+  project         = var.project_id
+  service_account = local.service_account
+  source_contents = templatefile("${path.module}/templates/restore.yaml.tftpl", {
+    project                = var.project_id
+    restore_target_project_id = var.restore_target_project_id
+    instanceName           = var.restore_instance_name
+    sourceInstanceName     = var.sql_instance
+    sourceBackupUri        = var.restore_source_uri
+    databases              = jsonencode(var.export_databases)
+    dbType                 = split("_", data.google_sql_database_instance.backup_instance.database_version)[0]
+    compressExport         = var.compress_export
+    enableConnectorParams  = var.enable_connector_params
+    connectorParamsTimeout = var.connector_params_timeout
+    logDbName              = var.log_db_name_to_export
+    serverlessExport       = var.use_serverless_export
+  })
+  deletion_protection = var.deletion_protection
+}
+
+resource "google_cloud_scheduler_job" "sql_restore" {
+  count       = var.enable_restore ? 1 : 0
+  name        = local.restore_name
+  project     = var.project_id
+  region      = var.region
+  description = "Managed by Terraform - Triggers a SQL Restore via Workflows"
+  schedule    = var.restore_schedule
+  time_zone   = var.scheduler_timezone
+
+  http_target {
+    uri         = "https://workflowexecutions.googleapis.com/v1/${google_workflows_workflow.sql_restore[0].id}/executions"
+    http_method = "POST"
+    oauth_token {
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+      service_account_email = local.service_account
+    }
+  }
+}
+
+# We want to get notified if there hasn't been at least one successful restore in a day
+resource "google_monitoring_alert_policy" "sql_restore_workflow_success_alert" {
+  count        = var.enable_restore && var.enable_restore_monitoring ? 1 : 0
+  display_name = "Failed workflow: ${local.restore_name}"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Failed workflow: ${local.restore_name}"
+    condition_monitoring_query_language {
+      query    = <<-EOT
+        fetch workflows.googleapis.com/Workflow
+        | filter workflow_id == '${local.restore_name}'
+        | metric 'workflows.googleapis.com/finished_execution_count'
+          | filter metric.status == 'SUCCEEDED'
+          | group_by ${var.restore_monitoring_frequency}, [value_finished_execution_count_sum: sum(value.finished_execution_count)]
+          | every ${var.restore_monitoring_frequency}
           | condition val() < 1 '1'
       EOT
       duration = "3600s"

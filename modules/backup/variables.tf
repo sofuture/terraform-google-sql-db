@@ -198,3 +198,61 @@ variable "deletion_protection" {
   type        = bool
   default     = true
 }
+
+variable "enable_restore" {
+  description = "Enable database restore functionality"
+  type        = bool
+  default     = false
+}
+
+variable "restore_instance_name" {
+  description = "Name of the instance to restore to"
+  type        = string
+  default     = null
+  validation {
+    condition     = var.enable_restore ? var.restore_instance_name != null : true
+    error_message = "restore_instance_name must be set when enable_restore is true"
+  }
+}
+
+variable "restore_source_uri" {
+  description = "URI of the backup to restore from"
+  type        = string
+  default     = null
+  validation {
+    condition     = var.enable_restore ? can(regex("^gs:\\/\\/", var.restore_source_uri)) : true
+    error_message = "restore_source_uri must be a valid GCS URI starting with gs:// when enable_restore is true"
+  }
+}
+
+variable "restore_schedule" {
+  description = "Schedule for the restore job in cron format"
+  type        = string
+  default     = "0 0 * * *" # Daily at midnight
+  validation {
+    condition     = can(regex("^[0-9*,-/]+ [0-9*,-/]+ [0-9*,-/]+ [0-9*,-/]+ [0-9*,-/]+$", var.restore_schedule))
+    error_message = "restore_schedule must be a valid cron expression"
+  }
+}
+
+variable "enable_restore_monitoring" {
+  description = "Enable monitoring for restore operations"
+  type        = bool
+  default     = true
+}
+
+variable "restore_monitoring_frequency" {
+  description = "Frequency for monitoring restore operations"
+  type        = string
+  default     = "1d"
+  validation {
+    condition     = can(regex("^[0-9]+[mhd]$", var.restore_monitoring_frequency))
+    error_message = "restore_monitoring_frequency must be in the format of <number>[m|h|d] (e.g., 1h, 30m, 1d)"
+  }
+}
+
+variable "restore_target_project_id" {
+  description = "The project ID where the database will be restored to. If not specified, uses the same project as the source."
+  type        = string
+  default     = var.project_id
+}
